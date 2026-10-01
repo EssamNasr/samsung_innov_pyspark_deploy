@@ -1,0 +1,61 @@
+name: DataOps PySpark CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-to-aws:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_GITHUB_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload PySpark Job to S3
+        run: |
+          aws s3 cp orders.py \
+            s3://${{ vars.AWS_S3_BUCKET }}/jobs/orders-${{ github.sha }}.py
+
+      - name: Submit EMR Serverless PySpark Job
+        id: submit-job
+        run: |
+          JOB_RUN_ID=$(aws emr-serverless start-job-run \
+            --application-id "${{ vars.EMR_SERVERLESS_APPLICATION_ID }}" \
+            --execution-role-arn "${{ vars.EMR_EXECUTION_ROLE_ARN }}" \
+            --job-driver '{
+              "sparkSubmit": {
+                "entryPoint": "s3://${{ vars.AWS_S3_BUCKET }}/jobs/orders-${{ github.sha }}.py",
+                "sparkSubmitParameters": "--conf spark.executor.cores=2 --conf spark.executor.memory=4g"
+              }
+            }' \
+            --configuration-overrides '{
+              "monitoringConfiguration": {
+                "s3MonitoringConfiguration": {
+                  "logUri": "s3://${{ vars.AWS_S3_BUCKET }}/logs/"
+                }
+              }
+            }' \
+            --query "jobRunId" \
+            --output text)
+
+          echo "job_run_id=$JOB_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Started EMR Serverless job: $JOB_RUN_ID"
+
+      - name: Display Deployment Details
+        run: |
+          echo "Deployed source:"
+          echo "s3://${{ vars.AWS_S3_BUCKET }}/jobs/orders-${{ github.sha }}.py"
+          echo "EMR Serverless job run ID:"
+          echo "${{ steps.submit-job.outputs.job_run_id }}"
